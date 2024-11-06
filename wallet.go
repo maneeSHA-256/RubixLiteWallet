@@ -66,7 +66,7 @@ func main() {
 	http.HandleFunc("/sign", signTransactionHandler)
 
 	fmt.Println("Starting BIP39 Wallet Services...")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(":8081", nil))
 }
 
 // Handler: Create a new wallet with BIP39 keys and request user ID from node
