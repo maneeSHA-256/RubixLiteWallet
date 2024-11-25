@@ -13,17 +13,12 @@ import (
 	"net/http"
 	"os"
 
-	// "github.com/btcsuite/btcd/btcec/v2"
-
 	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/tyler-smith/go-bip39"
-	// crypto "github.com/rubixchain/rubixgoplatform/crypto"
-	// "github.com/rubixchain/rubixgoplatform/util"
-	// "github.com/rubixchain/rubixgoplatform/wrapper/uuid"
 )
 
 const (
-	// PvtKeyFileName   string = "pvtKey.txt"
+	PvtKeyFileName   string = "pvtKey.txt"
 	PubKeyFileName   string = "pubKey.txt"
 	MnemonicFileName string = "mnemonic.txt"
 	// pwd              string = "mypassword"
@@ -33,8 +28,9 @@ const (
 
 // User data structure for wallet management
 type User struct {
-	DID       string // IPFS hash (simulated)
-	PublicKey *secp256k1.PublicKey
+	DID        string // IPFS hash (simulated)
+	PublicKey  *secp256k1.PublicKey
+	PrivateKey *secp256k1.PrivateKey
 	// ChildPath int
 	Mnemonic string
 }
@@ -79,7 +75,7 @@ func createWalletHandler(w http.ResponseWriter, r *http.Request) {
 	mnemonic, _ := bip39.NewMnemonic(entropy)
 
 	// Derive key pair
-	_, publicKey := generateKeyPair(mnemonic)
+	pvtKey, publicKey := generateKeyPair(mnemonic)
 
 	// Request user ID (IPFS hash) from node
 	did, pubKeystr, err := didRequest(publicKey, req.Port)
@@ -102,7 +98,7 @@ func createWalletHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("Response public key does NOT match the original.")
 	}
 	// Store user data
-	user := &User{PublicKey: publicKey, DID: did, Mnemonic: mnemonic}
+	user := &User{PublicKey: publicKey, PrivateKey: pvtKey, DID: did, Mnemonic: mnemonic}
 	wallet[did] = user
 
 	saveUserData(user)
@@ -124,18 +120,16 @@ func signTransactionHandler(w http.ResponseWriter, r *http.Request) {
 		return // Folder doesn't exist
 	}
 
-	//read mnemonic
-	mnemonic, err := os.ReadFile(userDir + "/private/" + MnemonicFileName)
+	//read private key
+	pvtKeyBytes, err := os.ReadFile(userDir + "/private/" + PvtKeyFileName)
 	if err != nil {
 		log.Fatal("err:", err)
 		return
 	}
 
-	// derive privatekey from mnemonic
-	privKey, err := derivePrivateKey(string(mnemonic))
+	privKey := secp256k1.PrivKeyFromBytes(pvtKeyBytes)
 	if err != nil {
-		log.Fatal("err:", err)
-		return
+		log.Fatal("failed to parse private key bytes, err", err)
 	}
 
 	//read public key
@@ -193,15 +187,6 @@ func generateKeyPair(mnemonic string) (*secp256k1.PrivateKey, *secp256k1.PublicK
 	return privateKey, publicKey
 }
 
-// DerivePrivateKey generates the private key from the mnemonic when needed
-func derivePrivateKey(mnemonic string) (*secp256k1.PrivateKey, error) {
-	// Derive the seed and private key from the mnemonic here
-	seed := bip39.NewSeed(mnemonic, "")
-	privateKey := secp256k1.PrivKeyFromBytes(seed[:32])
-
-	return privateKey, nil
-}
-
 // send DID request to rubix node
 func didRequest(pubkey *secp256k1.PublicKey, port string) (string, string, error) {
 	pubKeyStr := hex.EncodeToString(pubkey.SerializeUncompressed())
@@ -227,7 +212,6 @@ func didRequest(pubkey *secp256k1.PublicKey, port string) (string, string, error
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Println("Error sending HTTP request:", err)
-		// resp.Body.Close()
 		return "", "", err
 	}
 	defer resp.Body.Close()
@@ -296,6 +280,13 @@ func saveUserData(user *User) error {
 	err = FileWrite(dirName+"/private/"+MnemonicFileName, []byte(user.Mnemonic))
 	if err != nil {
 		log.Fatal("failed to write mnemonic file", "err", err)
+		return err
+	}
+
+	//write mnemonic key to file
+	err = FileWrite(dirName+"/private/"+PvtKeyFileName, user.PrivateKey.Serialize())
+	if err != nil {
+		log.Fatal("failed to write private key file", "err", err)
 		return err
 	}
 

@@ -9,10 +9,10 @@ go run wallet.go
 ```
 ### Curl request to create a wallet
 ```
-curl -X POST http://localhost:8080/create_wallet -d '{"port":"<rubix node port number>"}'
+curl -X POST http://localhost:8081/create_wallet -d '{"port":"<rubix node port number>"}'
 ```
 
 ### Curl request to sign
 ```
-curl -X GET http://localhost:8080/sign -d '{"did":"<rubix node DID>","data":"txn_data"}'
+curl -X GET http://localhost:8081/sign -d '{"did":"<rubix node DID>","data":"txn_data"}'
 ```
