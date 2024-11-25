@@ -16,3 +16,7 @@ curl -X POST http://localhost:8081/create_wallet -d '{"port":"<rubix node port n
 ```
 curl -X GET http://localhost:8081/sign -d '{"did":"<rubix node DID>","data":"txn_data"}'
 ```
+### Curl request to request Transaction
+```
+curl -X GET http://localhost:8081/request-txn -d '{"did":"<sender DID>","receiver":"<receiver DID>", "rbt_amount":<transaction amount in float>}'
+```

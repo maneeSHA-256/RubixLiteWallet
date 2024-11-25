@@ -1,6 +1,11 @@
 package main
 
 import (
+	"database/sql"
+
+	jwt "github.com/maneeSHA-256/RubixLiteWallet/jwt"
+	storage "github.com/maneeSHA-256/RubixLiteWallet/storage"
+
 	"bytes"
 	"crypto"
 	"crypto/ecdsa"
@@ -11,29 +16,12 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 
 	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/tyler-smith/go-bip39"
-)
 
-const (
-	PvtKeyFileName   string = "pvtKey.txt"
-	PubKeyFileName   string = "pubKey.txt"
-	MnemonicFileName string = "mnemonic.txt"
-	// pwd              string = "mypassword"
-	// childPath        int    = 0
-	dir string = "./Rubix/"
+	_ "github.com/mattn/go-sqlite3"
 )
-
-// User data structure for wallet management
-type User struct {
-	DID        string // IPFS hash (simulated)
-	PublicKey  *secp256k1.PublicKey
-	PrivateKey *secp256k1.PrivateKey
-	// ChildPath int
-	Mnemonic string
-}
 
 // did request
 type DIDRequest struct {
@@ -53,13 +41,31 @@ type SignResponse struct {
 	SignedData string `json:"signed_data"`
 }
 
-// Wallet service: holds user key pairs in memory for simplicity
-var wallet = make(map[string]*User)
+// transaction request
+type TxnRequest struct {
+	DID         string  `json:"did"`
+	ReceiverDID string  `json:"receiver"`
+	RBTAmount   float64 `json:"rbt_amount"`
+}
+
+// sqlite database: manages tables for user data and jwt tokens
+var db *sql.DB
 
 // Main function to start wallet and node services
 func main() {
+	// Initialize storage module and get the db object
+	var err error
+	db, err = storage.InitDatabase()
+	if err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	jwt.InitJWT(db, []byte("RubixBIPWallet"))
+
+	// Register HTTP handlers
 	http.HandleFunc("/create_wallet", createWalletHandler)
 	http.HandleFunc("/sign", signTransactionHandler)
+	http.HandleFunc("/request_txn", requestTransactionHandler)
 
 	fmt.Println("Starting BIP39 Wallet Services...")
 	log.Fatal(http.ListenAndServe(":8081", nil))
@@ -82,6 +88,7 @@ func createWalletHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Fatal("failed did request from rubix node, err:", err)
 	}
+
 	// Convert hex string back to bytes
 	pubKeyByte, err := hex.DecodeString(pubKeystr)
 	if err != nil {
@@ -96,12 +103,36 @@ func createWalletHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("Response public key matches the original!")
 	} else {
 		fmt.Println("Response public key does NOT match the original.")
+		return
 	}
-	// Store user data
-	user := &User{PublicKey: publicKey, PrivateKey: pvtKey, DID: did, Mnemonic: mnemonic}
-	wallet[did] = user
 
-	saveUserData(user)
+	// Convert keys to strings
+	privKeyStr := hex.EncodeToString(pvtKey.Serialize())
+	// pubKeyStr := hex.EncodeToString(publicKey.SerializeCompressed())
+
+	// Store user data in the database
+	err = storage.InsertUser(did, pubKeystr, privKeyStr, mnemonic)
+	if err != nil {
+		log.Fatalf("failed to store user data in database: %v", err)
+	}
+
+	// // Store user data
+	// user := &User{PublicKey: publicKey, PrivateKey: pvtKey, DID: did, Mnemonic: mnemonic}
+	// // wallet[did] = user
+
+	// pvtKeyStr := hex.EncodeToString(pvtKey.Serialize())
+
+	// saveUserData(user)
+
+	// // Store user in database
+	// _, err = db.Exec(
+	// 	"INSERT INTO users (did, public_key, mnemonic) VALUES (?, ?, ?)",
+	// 	did, pubKeystr, mnemonic,
+	// )
+	// if err != nil {
+	// 	http.Error(w, "Failed to store user in database", http.StatusInternalServerError)
+	// 	return
+	// }
 
 	// // Respond with wallet details
 	resp := map[string]string{"did": did}
@@ -113,58 +144,30 @@ func signTransactionHandler(w http.ResponseWriter, r *http.Request) {
 	var req SignRequest
 	json.NewDecoder(r.Body).Decode(&req)
 
-	userDir := dir + req.DID
-	_, err := os.Stat(userDir)
-	if os.IsNotExist(err) {
-		log.Fatal("invalid did, did folder does not exist")
-		return // Folder doesn't exist
-	}
-
-	//read private key
-	pvtKeyBytes, err := os.ReadFile(userDir + "/private/" + PvtKeyFileName)
+	user, err := storage.GetUserByDID(req.DID)
 	if err != nil {
-		log.Fatal("err:", err)
+		log.Fatalf("failed to get user data: %v", err)
+		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
 
-	privKey := secp256k1.PrivKeyFromBytes(pvtKeyBytes)
-	if err != nil {
-		log.Fatal("failed to parse private key bytes, err", err)
-	}
-
-	//read public key
-	pubKeyBytes, err := os.ReadFile(userDir + "/public/" + PubKeyFileName)
-	if err != nil {
-		log.Fatal("err:", err)
-		return
-	}
-
-	pubKey, err := secp256k1.ParsePubKey(pubKeyBytes)
-	if err != nil {
-		log.Fatal("failed to parse public key bytes, err", err)
-	}
-
-	user := User{
-		DID:       req.DID,
-		PublicKey: pubKey,
-	}
 	fmt.Println("sign request:", req)
 
-	// Sign the data
-	dst := make([]byte, hex.DecodedLen(len(req.Data)))
-	hex.Decode(dst, []byte(req.Data))
+	// Signing data
+	dataToSign := make([]byte, hex.DecodedLen(len(req.Data)))
+	hex.Decode(dataToSign, []byte(req.Data))
 
-	signature, err := signData(privKey.ToECDSA(), dst)
+	signature, err := signData(user.PrivateKey.ToECDSA(), dataToSign)
 	if err != nil {
 		log.Fatal("failed to sign in wallet, err:", err)
 		return
 	}
 
-	sigstr := hex.EncodeToString(signature)
-	sigbyt, _ := hex.DecodeString(sigstr)
+	sigStr := hex.EncodeToString(signature)
+	sigByt, _ := hex.DecodeString(sigStr)
 
-	fmt.Printf("signature data: \n sig: %v \n data: %v \n pubKey: %v", sigstr, dst, *user.PublicKey.ToECDSA())
-	isValid := verifySignature(user.PublicKey, dst, sigbyt)
+	fmt.Printf("signature data: \n sig: %v \n data: %v \n pubKey: %v", sigStr, dataToSign, *user.PublicKey.ToECDSA())
+	isValid := verifySignature(user.PublicKey, dataToSign, sigByt)
 	if !isValid {
 		log.Fatal("signature verification failed")
 		return
@@ -173,8 +176,39 @@ func signTransactionHandler(w http.ResponseWriter, r *http.Request) {
 	// Respond with signature and signed data
 	resp := SignResponse{
 		DID:        user.DID,
-		Signature:  sigstr,
+		Signature:  sigStr,
 		SignedData: req.Data,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func requestTransactionHandler(w http.ResponseWriter, r *http.Request) {
+	var req TxnRequest
+	json.NewDecoder(r.Body).Decode(&req)
+
+	// Retrieve user data
+	user, err := storage.GetUserByDID(req.DID)
+	if err != nil {
+		log.Printf("User not found: %v", err)
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	// // Generate a JWT for the transaction
+	// amount := 100.0                       // Example amount
+	// receiverDID := "receiver-did-example" // Replace with actual receiver DID from the request
+
+	jwtToken, err := jwt.GenerateJWT(user.DID, req.ReceiverDID, req.RBTAmount)
+	if err != nil {
+		http.Error(w, "Failed to generate JWT", http.StatusInternalServerError)
+		return
+	}
+
+	// Respond with the JWT
+	resp := map[string]string{
+		"did":    user.DID,
+		"jwt":    jwtToken,
+		"status": "Transaction JWT generated successfully",
 	}
 	json.NewEncoder(w).Encode(resp)
 }
@@ -259,64 +293,4 @@ func verifySignature(publicKey *secp256k1.PublicKey, data []byte, signature []by
 	isValid := ecdsa.VerifyASN1(pubKey, data, signature)
 
 	return isValid
-}
-
-// save user data into did folder
-func saveUserData(user *User) error {
-	dirName := dir + user.DID
-	err := os.MkdirAll(dirName+"/private", os.ModeDir|os.ModePerm)
-	if err != nil {
-		log.Fatal("failed to create directory", "err", err)
-		return err
-	}
-
-	err = os.MkdirAll(dirName+"/public", os.ModeDir|os.ModePerm)
-	if err != nil {
-		log.Fatal("failed to create directory", "err", err)
-		return err
-	}
-
-	//write mnemonic key to file
-	err = FileWrite(dirName+"/private/"+MnemonicFileName, []byte(user.Mnemonic))
-	if err != nil {
-		log.Fatal("failed to write mnemonic file", "err", err)
-		return err
-	}
-
-	//write mnemonic key to file
-	err = FileWrite(dirName+"/private/"+PvtKeyFileName, user.PrivateKey.Serialize())
-	if err != nil {
-		log.Fatal("failed to write private key file", "err", err)
-		return err
-	}
-
-	//write public key to file
-	err = FileWrite(dirName+"/public/"+PubKeyFileName, user.PublicKey.SerializeCompressed())
-	if err != nil {
-		log.Fatal("failed to write public key file", "err", err)
-		return err
-	}
-
-	// //write child path to file
-	// err = FileWrite(dirName+"/childpath.txt", []byte(strconv.Itoa(user.ChildPath)))
-	// if err != nil {
-	// 	log.Fatal("failed to write child path file", "err", err)
-	// 	return err
-	// }
-
-	return nil
-}
-
-// write to file
-func FileWrite(fileName string, data []byte) error {
-	f, err := os.Create(fileName)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(data)
-	if err != nil {
-		return err
-	}
-	f.Close()
-	return nil
 }

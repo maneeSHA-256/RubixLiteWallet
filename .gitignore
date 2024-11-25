@@ -1,2 +1,5 @@
 # keys folder
 Rubix/
+
+#filesto ignore
+*.db
