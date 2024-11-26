@@ -43,9 +43,10 @@ type SignResponse struct {
 
 // transaction request
 type TxnRequest struct {
-	DID         string  `json:"did"`
-	ReceiverDID string  `json:"receiver"`
-	RBTAmount   float64 `json:"rbt_amount"`
+	RubixNodePort string  `json:"port"`
+	DID           string  `json:"did"`
+	ReceiverDID   string  `json:"receiver"`
+	RBTAmount     float64 `json:"rbt_amount"`
 }
 
 // sqlite database: manages tables for user data and jwt tokens
@@ -100,41 +101,22 @@ func createWalletHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// Check if the reconstructed key matches the original
 	if publicKey.IsEqual(reconstructedPubKey) {
-		fmt.Println("Response public key matches the original!")
+		log.Println("Response public key matches the original!")
 	} else {
-		fmt.Println("Response public key does NOT match the original.")
+		log.Println("Response public key does NOT match the original.")
 		return
 	}
 
 	// Convert keys to strings
 	privKeyStr := hex.EncodeToString(pvtKey.Serialize())
-	// pubKeyStr := hex.EncodeToString(publicKey.SerializeCompressed())
+	pubKeyStr := hex.EncodeToString(publicKey.SerializeCompressed())
 
 	// Store user data in the database
-	err = storage.InsertUser(did, pubKeystr, privKeyStr, mnemonic)
+	err = storage.InsertUser(did, pubKeyStr, privKeyStr, mnemonic)
 	if err != nil {
 		log.Fatalf("failed to store user data in database: %v", err)
 	}
 
-	// // Store user data
-	// user := &User{PublicKey: publicKey, PrivateKey: pvtKey, DID: did, Mnemonic: mnemonic}
-	// // wallet[did] = user
-
-	// pvtKeyStr := hex.EncodeToString(pvtKey.Serialize())
-
-	// saveUserData(user)
-
-	// // Store user in database
-	// _, err = db.Exec(
-	// 	"INSERT INTO users (did, public_key, mnemonic) VALUES (?, ?, ?)",
-	// 	did, pubKeystr, mnemonic,
-	// )
-	// if err != nil {
-	// 	http.Error(w, "Failed to store user in database", http.StatusInternalServerError)
-	// 	return
-	// }
-
-	// // Respond with wallet details
 	resp := map[string]string{"did": did}
 	json.NewEncoder(w).Encode(resp)
 }
@@ -159,18 +141,17 @@ func signTransactionHandler(w http.ResponseWriter, r *http.Request) {
 
 	signature, err := signData(user.PrivateKey.ToECDSA(), dataToSign)
 	if err != nil {
-		log.Fatal("failed to sign in wallet, err:", err)
-		return
+		log.Fatal("\n failed to sign in wallet, err:", err)
 	}
 
 	sigStr := hex.EncodeToString(signature)
-	sigByt, _ := hex.DecodeString(sigStr)
 
 	fmt.Printf("signature data: \n sig: %v \n data: %v \n pubKey: %v", sigStr, dataToSign, *user.PublicKey.ToECDSA())
-	isValid := verifySignature(user.PublicKey, dataToSign, sigByt)
+	isValid := verifySignature(user.PublicKey, dataToSign, signature)
 	if !isValid {
-		log.Fatal("signature verification failed")
-		return
+		log.Fatal("\n signature verification failed")
+	} else {
+		log.Println("signature verified successfully")
 	}
 
 	// Respond with signature and signed data
@@ -186,27 +167,29 @@ func requestTransactionHandler(w http.ResponseWriter, r *http.Request) {
 	var req TxnRequest
 	json.NewDecoder(r.Body).Decode(&req)
 
-	// Retrieve user data
+	jwtToken, err := jwt.GenerateJWT(req.DID, req.ReceiverDID, req.RBTAmount)
+	if err != nil {
+		log.Fatal("failed to generate jwt, err:", err)
+		http.Error(w, "Failed to generate JWT", http.StatusInternalServerError)
+	}
+
+	//fetch user public key
 	user, err := storage.GetUserByDID(req.DID)
 	if err != nil {
-		log.Printf("User not found: %v", err)
-		http.Error(w, "User not found", http.StatusNotFound)
-		return
+		log.Fatalf("failed to get user data: %v", err)
 	}
 
-	// // Generate a JWT for the transaction
-	// amount := 100.0                       // Example amount
-	// receiverDID := "receiver-did-example" // Replace with actual receiver DID from the request
-
-	jwtToken, err := jwt.GenerateJWT(user.DID, req.ReceiverDID, req.RBTAmount)
-	if err != nil {
-		http.Error(w, "Failed to generate JWT", http.StatusInternalServerError)
-		return
+	//verifying jwt token
+	isValidTkn, tknClaims, err := jwt.VerifyToken(jwtToken, user.PublicKey.ToECDSA())
+	if isValidTkn {
+		log.Println("valid token with claims:", tknClaims)
+	} else {
+		log.Fatal("err:", err)
 	}
-
+	// SendAuthRequest(jwtToken, req.RubixNodePort)
 	// Respond with the JWT
 	resp := map[string]string{
-		"did":    user.DID,
+		"did":    req.DID,
 		"jwt":    jwtToken,
 		"status": "Transaction JWT generated successfully",
 	}
@@ -222,8 +205,8 @@ func generateKeyPair(mnemonic string) (*secp256k1.PrivateKey, *secp256k1.PublicK
 }
 
 // send DID request to rubix node
-func didRequest(pubkey *secp256k1.PublicKey, port string) (string, string, error) {
-	pubKeyStr := hex.EncodeToString(pubkey.SerializeUncompressed())
+func didRequest(pubkey *secp256k1.PublicKey, rubixNodePort string) (string, string, error) {
+	pubKeyStr := hex.EncodeToString(pubkey.SerializeCompressed())
 	data := map[string]interface{}{
 		"public_key": pubKeyStr,
 	}
@@ -233,7 +216,7 @@ func didRequest(pubkey *secp256k1.PublicKey, port string) (string, string, error
 		return "", "", err
 	}
 
-	url := fmt.Sprintf("http://localhost:%s/api/request-did-for-pubkey", port)
+	url := fmt.Sprintf("http://localhost:%s/api/request-did-for-pubkey", rubixNodePort)
 	req, err := http.NewRequest("GET", url, bytes.NewBuffer(bodyJSON))
 	if err != nil {
 		fmt.Println("Error creating HTTP request:", err)
@@ -271,9 +254,37 @@ func didRequest(pubkey *secp256k1.PublicKey, port string) (string, string, error
 	return respDID, respPubKey, nil
 }
 
+// SendAuthRequest sends a JWT authentication request to the Rubix node
+func SendAuthRequest(jwtToken string, rubixNodePort string) {
+	authURL := fmt.Sprintf("http://localhost:%s/api/jwt-authenticate", rubixNodePort)
+	req, err := http.NewRequest("POST", authURL, bytes.NewBuffer([]byte(jwtToken)))
+	if err != nil {
+		log.Fatalf("Failed to create request: %v", err)
+	}
+
+	// Add headers
+	req.Header.Set("Authorization", "Bearer "+jwtToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	// Make the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatalf("Error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Read the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Error reading response: %v", err)
+	}
+
+	fmt.Printf("Response from Rubix Node: %s\n", body)
+}
+
 // Sign data using secp256k1 private key
 func signData(privateKey crypto.PrivateKey, data []byte) ([]byte, error) {
-
 	//use sign function from crypto library
 	signature, err := privateKey.(crypto.Signer).Sign(rand.Reader, data, crypto.SHA3_256)
 	if err != nil {

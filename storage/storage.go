@@ -34,8 +34,8 @@ func InitDatabase() (*sql.DB, error) {
 	CREATE TABLE IF NOT EXISTS users (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		did TEXT UNIQUE NOT NULL,
-		public_key TEXT NOT NULL,
-		private_key TEXT NOT NULL,
+		public_key BLOB NOT NULL,
+		private_key BLOB NOT NULL,
 		mnemonic TEXT NOT NULL
 	);
 
@@ -52,13 +52,8 @@ func InitDatabase() (*sql.DB, error) {
 		log.Fatal("Failed to create tables:", err)
 	}
 
-	return db, nil	
+	return db, nil
 }
-
-// // Init initializes the storage module
-// func Init(database *sql.DB) {
-// 	db = database
-// }
 
 // insert user data
 func InsertUser(did, publicKey, privateKey, mnemonic string) error {
@@ -75,11 +70,17 @@ func InsertUser(did, publicKey, privateKey, mnemonic string) error {
 
 // fetch user data from user DID
 func GetUserByDID(did string) (*User, error) {
-	query := `SELECT public_key, mnemonic FROM users WHERE did = ?`
+	if db == nil {
+		log.Println("Database connection is nil")
+	} else {
+		log.Println("Database connection initialized successfully")
+	}
+
+	query := `SELECT public_key, private_key, mnemonic FROM users WHERE did = ?`
 	row := db.QueryRow(query, did)
 
 	var publicKey, privateKey, mnemonic string
-	err := row.Scan(&publicKey, &mnemonic)
+	err := row.Scan(&publicKey, &privateKey, &mnemonic)
 	if err != nil {
 		return nil, err
 	}
