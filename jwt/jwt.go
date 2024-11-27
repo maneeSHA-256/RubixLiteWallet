@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt"
-	"github.com/maneeSHA-256/RubixLiteWallet/storage"
 )
 
 var db *sql.DB
+var jwtSecret []byte
 
 // Initialize JWT module with database connection and secret
 func InitJWT(database *sql.DB, secret []byte) {
@@ -22,6 +22,7 @@ func InitJWT(database *sql.DB, secret []byte) {
 	}
 
 	db = database
+	jwtSecret = secret
 }
 
 // generate JWT
@@ -34,20 +35,14 @@ func GenerateJWT(did string, receiverDID string, amount float64) (string, error)
 		"exp":          time.Now().Add(time.Hour * 24).Unix(),
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
-	//fetch user's private key to sign
-	user, err := storage.GetUserByDID(did)
-	if err != nil {
-		log.Println("failed to fetch user data to sign the jwt, err:", err)
-		return "", err
-	}
 	// define token header
-	token.Header["alg"] = "ES256"
+	token.Header["alg"] = "HS256"
 	token.Header["typ"] = "JWT"
 
 	//get the signed token
-	tokenString, err := token.SignedString(user.PrivateKey.ToECDSA())
+	tokenString, err := token.SignedString(jwtSecret)
 	if err != nil {
 		return "", err
 	}
@@ -68,10 +63,10 @@ func GenerateJWT(did string, receiverDID string, amount float64) (string, error)
 func VerifyToken(tokenString string, publicKey *ecdsa.PublicKey) (bool, jwt.MapClaims, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		// Ensure the signing method is ECDSA
-		if _, ok := token.Method.(*jwt.SigningMethodECDSA); !ok {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		return publicKey, nil
+		return jwtSecret, nil
 	})
 	if err != nil {
 		log.Printf("failed to parse jwt")
