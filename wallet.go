@@ -52,6 +52,28 @@ type TxnRequest struct {
 // sqlite database: manages tables for user data and jwt tokens
 var db *sql.DB
 
+// CORS middleware to enable CORS headers for all incoming requests
+func enableCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Main function to start wallet and node services
 func main() {
 	// Initialize storage module and get the db object
@@ -64,12 +86,18 @@ func main() {
 	jwt.InitJWT(db, []byte("RubixBIPWallet"))
 
 	// Register HTTP handlers
-	http.HandleFunc("/create_wallet", createWalletHandler)
-	http.HandleFunc("/sign", signTransactionHandler)
-	http.HandleFunc("/request_txn", requestTransactionHandler)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/create_wallet", createWalletHandler)
+	mux.HandleFunc("/sign", signTransactionHandler)
+	mux.HandleFunc("/request_txn", requestTransactionHandler)
 
-	fmt.Println("Starting BIP39 Wallet Services...")
-	log.Fatal(http.ListenAndServe(":8081", nil))
+	// Wrap ServeMux with CORS middleware
+	wrappedMux := enableCORS(mux)
+
+	// Start the server
+	fmt.Println("Starting BIP39 Wallet Services on port 8081...")
+	log.Fatal(http.ListenAndServe(":8081", wrappedMux))
+
 }
 
 // Handler: Create a new wallet with BIP39 keys and request user ID from node
@@ -219,7 +247,7 @@ func didRequest(pubkey *secp256k1.PublicKey, rubixNodePort string) (string, stri
 	}
 
 	url := fmt.Sprintf("http://localhost:%s/api/request-did-for-pubkey", rubixNodePort)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyJSON))
+	req, err := http.NewRequest("GET", url, bytes.NewBuffer(bodyJSON))
 	if err != nil {
 		fmt.Println("Error creating HTTP request:", err)
 		return "", "", err
@@ -263,6 +291,7 @@ func SendAuthRequest(jwtToken string, rubixNodePort string) string {
 	req, err := http.NewRequest("POST", authURL, nil)
 	if err != nil {
 		log.Fatalf("Failed to create request: %v", err)
+		return "Failed to create request"
 	}
 
 	// Add headers
@@ -274,6 +303,7 @@ func SendAuthRequest(jwtToken string, rubixNodePort string) string {
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Fatalf("Error sending request: %v", err)
+		return "Error sending request"
 	}
 	defer resp.Body.Close()
 
@@ -281,6 +311,7 @@ func SendAuthRequest(jwtToken string, rubixNodePort string) string {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Fatalf("Error reading response: %v", err)
+		return "Error reading response"
 	}
 
 	fmt.Printf("Response from Rubix Node: %s\n", body)
@@ -289,6 +320,7 @@ func SendAuthRequest(jwtToken string, rubixNodePort string) string {
 	err = json.Unmarshal(body, &response)
 	if err != nil {
 		fmt.Println("Error unmarshaling response:", err)
+		return "Error unmarshaling response"
 	}
 
 	result := response["message"].(string)

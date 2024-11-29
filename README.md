@@ -18,5 +18,5 @@ curl -X POST http://localhost:8081/sign -d '{"did":"<rubix node DID>","data":"tx
 ```
 ### Curl request to request Transaction
 ```
-curl -X POST http://localhost:8081/request-txn -d '{"port":"<sender port number>","did":"<sender DID>","receiver":"<receiver DID>", "rbt_amount":<transaction amount in float>}'
+curl -X POST http://localhost:8081/request_txn -d '{"port":"<sender port number>","did":"<sender DID>","receiver":"<receiver DID>", "rbt_amount":<transaction amount in float>}'
 ```
