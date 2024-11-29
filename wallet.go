@@ -187,13 +187,13 @@ func requestTransactionHandler(w http.ResponseWriter, r *http.Request) {
 		log.Fatal("err:", err)
 	}
 
-	SendAuthRequest(jwtToken, req.RubixNodePort)
+	result := SendAuthRequest(jwtToken, req.RubixNodePort)
 
 	// Respond with the JWT
 	resp := map[string]string{
 		"did":    req.DID,
 		"jwt":    jwtToken,
-		"status": "Transaction completed successfully",
+		"status": result,
 	}
 	json.NewEncoder(w).Encode(resp)
 }
@@ -219,7 +219,7 @@ func didRequest(pubkey *secp256k1.PublicKey, rubixNodePort string) (string, stri
 	}
 
 	url := fmt.Sprintf("http://localhost:%s/api/request-did-for-pubkey", rubixNodePort)
-	req, err := http.NewRequest("GET", url, bytes.NewBuffer(bodyJSON))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyJSON))
 	if err != nil {
 		fmt.Println("Error creating HTTP request:", err)
 		return "", "", err
@@ -257,7 +257,7 @@ func didRequest(pubkey *secp256k1.PublicKey, rubixNodePort string) (string, stri
 }
 
 // SendAuthRequest sends a JWT authentication request to the Rubix node
-func SendAuthRequest(jwtToken string, rubixNodePort string) {
+func SendAuthRequest(jwtToken string, rubixNodePort string) string {
 	log.Println("sending auth request to rubix node...")
 	authURL := fmt.Sprintf("http://localhost:%s/api/send-jwt-from-wallet", rubixNodePort)
 	req, err := http.NewRequest("POST", authURL, nil)
@@ -284,6 +284,15 @@ func SendAuthRequest(jwtToken string, rubixNodePort string) {
 	}
 
 	fmt.Printf("Response from Rubix Node: %s\n", body)
+	// Process the data as needed
+	var response map[string]interface{}
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		fmt.Println("Error unmarshaling response:", err)
+	}
+
+	result := response["message"].(string)
+	return result
 }
 
 // Sign data using secp256k1 private key
