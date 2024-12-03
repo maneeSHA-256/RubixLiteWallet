@@ -18,6 +18,7 @@ import (
 	"net/http"
 
 	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/gin-gonic/gin"
 	"github.com/tyler-smith/go-bip39"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -53,177 +54,167 @@ type TxnRequest struct {
 var db *sql.DB
 
 // CORS middleware to enable CORS headers for all incoming requests
-func enableCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
-
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-
-		w.Header().Set("Access-Control-Max-Age", "86400")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
+		// Handle preflight requests
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusOK)
 			return
 		}
 
-		next.ServeHTTP(w, r)
-	})
+		c.Next()
+	}
 }
 
 // Main function to start wallet and node services
 func main() {
-	// Initialize storage module and get the db object
+	// Initialize the database
 	var err error
 	db, err = storage.InitDatabase()
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
+	// Initialize JWT with database and secret
 	jwt.InitJWT(db, []byte("RubixBIPWallet"))
 
-	// Register HTTP handlers
-	mux := http.NewServeMux()
-	mux.HandleFunc("/create_wallet", createWalletHandler)
-	mux.HandleFunc("/sign", signTransactionHandler)
-	mux.HandleFunc("/request_txn", requestTransactionHandler)
+	// Set up Gin router
+	router := gin.Default()
 
-	// Wrap ServeMux with CORS middleware
-	wrappedMux := enableCORS(mux)
+	// Enable CORS middleware
+	router.Use(corsMiddleware())
 
-	// Start the server
-	fmt.Println("Starting BIP39 Wallet Services on port 8081...")
-	log.Fatal(http.ListenAndServe(":8081", wrappedMux))
+	// API endpoints
+	router.POST("/create_wallet", createWalletHandler)
+	router.POST("/sign", signTransactionHandler)
+	router.POST("/request_txn", requestTransactionHandler)
 
+	// Start the Gin server
+	log.Println("Starting BIP39 Wallet Services on port 8081...")
+	if err := router.Run(":8081"); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
+	}
 }
 
-// Handler: Create a new wallet with BIP39 keys and request user ID from node
-func createWalletHandler(w http.ResponseWriter, r *http.Request) {
+// Handler: Create a new wallet and request DID from node
+func createWalletHandler(c *gin.Context) {
 	var req DIDRequest
-	json.NewDecoder(r.Body).Decode(&req)
-
-	// Generate mnemonic
-	entropy, _ := bip39.NewEntropy(128)
-	mnemonic, _ := bip39.NewMnemonic(entropy)
-
-	// Derive key pair
-	pvtKey, publicKey := generateKeyPair(mnemonic)
-
-	// Request user ID (IPFS hash) from node
-	did, pubKeystr, err := didRequest(publicKey, req.Port)
-	if err != nil {
-		log.Fatal("failed did request from rubix node, err:", err)
-	}
-
-	// Convert hex string back to bytes
-	pubKeyByte, err := hex.DecodeString(pubKeystr)
-	if err != nil {
-		log.Fatalf("Failed to decode hex string: %v", err)
-	}
-	reconstructedPubKey, err := secp256k1.ParsePubKey(pubKeyByte)
-	if err != nil {
-		log.Fatal("failed to parse public key, err:", err)
-	}
-	// Check if the reconstructed key matches the original
-	if publicKey.IsEqual(reconstructedPubKey) {
-		log.Println("Response public key matches the original!")
-	} else {
-		log.Println("Response public key does NOT match the original.")
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 		return
 	}
 
-	// Convert keys to strings
-	privKeyStr := hex.EncodeToString(pvtKey.Serialize())
-	pubKeyStr := hex.EncodeToString(publicKey.SerializeCompressed())
+	// Generate mnemonic and derive key pair
+	entropy, _ := bip39.NewEntropy(128)
+	mnemonic, _ := bip39.NewMnemonic(entropy)
+	privateKey, publicKey := generateKeyPair(mnemonic)
 
-	// Store user data in the database
-	err = storage.InsertUser(did, pubKeyStr, privKeyStr, mnemonic)
+	// Request user DID from Rubix node
+	did, pubKeyStr, err := didRequest(publicKey, req.Port)
 	if err != nil {
-		log.Fatalf("failed to store user data in database: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to request DID"})
+		return
 	}
 
-	resp := map[string]string{"did": did}
-	json.NewEncoder(w).Encode(resp)
+	// Verify the returned public key
+	pubKeyBytes, _ := hex.DecodeString(pubKeyStr)
+	reconstructedPubKey, _ := secp256k1.ParsePubKey(pubKeyBytes)
+	if !publicKey.IsEqual(reconstructedPubKey) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Public key mismatch"})
+		return
+	}
+
+	// Save user to database
+	privKeyStr := hex.EncodeToString(privateKey.Serialize())
+	err = storage.InsertUser(did, pubKeyStr, privKeyStr, mnemonic)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store user data"})
+		return
+	}
+
+	// Respond with DID
+	c.JSON(http.StatusOK, gin.H{"did": did})
+	// Add a newline to the response body if required
+	c.Writer.Write([]byte("\n"))
 }
 
-// Handler: Sign transaction data with user's private key and respond with signature
-func signTransactionHandler(w http.ResponseWriter, r *http.Request) {
+// Handler: Sign transaction
+func signTransactionHandler(c *gin.Context) {
 	var req SignRequest
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
 
 	user, err := storage.GetUserByDID(req.DID)
 	if err != nil {
-		log.Fatalf("failed to get user data: %v", err)
-		http.Error(w, "User not found", http.StatusNotFound)
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
-	fmt.Println("sign request:", req)
-
-	// Signing data
-	dataToSign := make([]byte, hex.DecodedLen(len(req.Data)))
-	hex.Decode(dataToSign, []byte(req.Data))
-
+	dataToSign, _ := hex.DecodeString(req.Data)
 	signature, err := signData(user.PrivateKey.ToECDSA(), dataToSign)
 	if err != nil {
-		log.Fatal("\n failed to sign in wallet, err:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sign data"})
+		return
 	}
 
-	sigStr := hex.EncodeToString(signature)
-
-	fmt.Printf("signature data: \n sig: %v \n data: %v \n pubKey: %v", sigStr, dataToSign, *user.PublicKey.ToECDSA())
-	isValid := verifySignature(user.PublicKey, dataToSign, signature)
-	if !isValid {
-		log.Fatal("\n signature verification failed")
-	} else {
-		log.Println("signature verified successfully")
+	// Verify signature
+	if !verifySignature(user.PublicKey, dataToSign, signature) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Signature verification failed"})
+		return
 	}
 
-	// Respond with signature and signed data
-	resp := SignResponse{
-		DID:        user.DID,
-		Signature:  sigStr,
-		SignedData: req.Data,
-	}
-	json.NewEncoder(w).Encode(resp)
+	c.JSON(http.StatusOK, gin.H{
+		"did":        user.DID,
+		"signature":  hex.EncodeToString(signature),
+		"signedData": req.Data,
+	})
+	// Add a newline to the response body if required
+	c.Writer.Write([]byte("\n"))
 }
 
-func requestTransactionHandler(w http.ResponseWriter, r *http.Request) {
+// Handler: Request transaction
+func requestTransactionHandler(c *gin.Context) {
 	var req TxnRequest
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
 
 	jwtToken, err := jwt.GenerateJWT(req.DID, req.ReceiverDID, req.RBTAmount)
 	if err != nil {
-		log.Fatal("failed to generate jwt, err:", err)
-		http.Error(w, "Failed to generate JWT", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate JWT"})
+		return
 	}
 
-	//fetch user public key
 	user, err := storage.GetUserByDID(req.DID)
 	if err != nil {
-		log.Fatalf("failed to get user data: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
 	}
 
-	//verifying jwt token
-	isValidTkn, tknClaims, err := jwt.VerifyToken(jwtToken, user.PublicKey.ToECDSA())
-	if isValidTkn {
-		log.Println("valid token with claims:", tknClaims)
-	} else {
-		log.Fatal("err:", err)
+	isValid, claims, err := jwt.VerifyToken(jwtToken, user.PublicKey.ToECDSA())
+	if !isValid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err})
+		return
 	}
 
+	log.Println("Token claims:", claims)
 	result := SendAuthRequest(jwtToken, req.RubixNodePort)
 
-	// Respond with the JWT
-	resp := map[string]string{
+	c.JSON(http.StatusOK, gin.H{
 		"did":    req.DID,
 		"jwt":    jwtToken,
 		"status": result,
-	}
-	json.NewEncoder(w).Encode(resp)
+	})
+	// Add a newline to the response body if required
+	c.Writer.Write([]byte("\n"))
 }
 
 // Generate secp256k1 key pair from mnemonic
