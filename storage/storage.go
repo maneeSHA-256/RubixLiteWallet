@@ -16,6 +16,7 @@ type User struct {
 	PrivateKey *secp256k1.PrivateKey
 	// ChildPath int
 	Mnemonic string
+	Port     int
 }
 
 // sqlite database: manages tables for user data and jwt tokens
@@ -36,7 +37,8 @@ func InitDatabase() (*sql.DB, error) {
 		did TEXT UNIQUE NOT NULL,
 		public_key BLOB NOT NULL,
 		private_key BLOB NOT NULL,
-		mnemonic TEXT NOT NULL
+		mnemonic TEXT NOT NULL,
+		port INTEGER NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS jwt_tokens (
@@ -56,15 +58,15 @@ func InitDatabase() (*sql.DB, error) {
 }
 
 // insert user data
-func InsertUser(did, publicKey, privateKey, mnemonic string) error {
+func InsertUser(did, publicKey, privateKey, mnemonic string, port int) error {
 	if db == nil {
 		log.Println("Database connection is nil")
 	} else {
 		log.Println("Database connection initialized successfully")
 	}
 
-	query := `INSERT INTO users (did, public_key, private_key, mnemonic) VALUES (?, ?, ?, ?)`
-	_, err := db.Exec(query, did, publicKey, privateKey, mnemonic)
+	query := `INSERT INTO users (did, public_key, private_key, mnemonic, port) VALUES (?, ?, ?, ?, ?)`
+	_, err := db.Exec(query, did, publicKey, privateKey, mnemonic, port)
 	return err
 }
 
@@ -76,11 +78,12 @@ func GetUserByDID(did string) (*User, error) {
 		log.Println("Database connection initialized successfully")
 	}
 
-	query := `SELECT public_key, private_key, mnemonic FROM users WHERE did = ?`
+	query := `SELECT public_key, private_key, mnemonic, port FROM users WHERE did = ?`
 	row := db.QueryRow(query, did)
 
 	var publicKey, privateKey, mnemonic string
-	err := row.Scan(&publicKey, &privateKey, &mnemonic)
+	var port int
+	err := row.Scan(&publicKey, &privateKey, &mnemonic, &port)
 	if err != nil {
 		return nil, err
 	}
@@ -109,5 +112,6 @@ func GetUserByDID(did string) (*User, error) {
 		PublicKey:  pubKey,
 		PrivateKey: privKey,
 		Mnemonic:   mnemonic,
+		Port:       port,
 	}, nil
 }
