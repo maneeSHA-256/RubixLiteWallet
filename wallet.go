@@ -104,11 +104,16 @@ func main() {
 	router.Use(corsMiddleware())
 
 	// API endpoints
+	//DID features
 	router.POST("/create_wallet", createWalletHandler)
-	router.POST("/sign", signTransactionHandler)
-	router.POST("/request_txn", requestTransactionHandler)
+	router.POST("/register_did", registerDIDHandler)
+	//RBT features
 	router.GET("/request_balance", requestBalanceHandler)
 	router.POST("/testrbt/create", createTestRBTHandler)
+	//Txn features
+	router.POST("/request_txn", requestTransactionHandler)
+	router.GET("/txn/by_did", getTxnByDIDHandler)
+	router.POST("/sign", signTransactionHandler)
 
 	// Start the Gin server
 	log.Println("Starting BIP39 Wallet Services on port 8081...")
@@ -121,7 +126,7 @@ func main() {
 func createWalletHandler(c *gin.Context) {
 	var req DIDRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input \n"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 		return
 	}
 
@@ -133,7 +138,7 @@ func createWalletHandler(c *gin.Context) {
 	// Request user DID from Rubix node
 	did, pubKeyStr, err := didRequest(publicKey, strconv.Itoa(req.Port))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to request DID \n"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to request DID"})
 		return
 	}
 
@@ -159,6 +164,39 @@ func createWalletHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"did": did})
 	// Add a newline to the response body if required
 	c.Writer.Write([]byte("\n"))
+}
+
+// Handler: registerDIDHandler publishes the user's DID in the network
+func registerDIDHandler(c *gin.Context) {
+	var req ReqToRubixNode
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		// Add a newline to the response body if required
+		c.Writer.Write([]byte("\n"))
+		return
+	}
+
+	user, err := storage.GetUserByDID(req.DID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		// Add a newline to the response body if required
+		c.Writer.Write([]byte("\n"))
+		return
+	}
+
+	resp, err := registerDIDRequest(req.DID, strconv.Itoa(user.Port))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err,
+		})
+		// Add a newline to the response body if required
+		c.Writer.Write([]byte("\n"))
+	}
+
+	c.JSON(http.StatusOK, resp)
+	// Add a newline to the response body if required
+	c.Writer.Write([]byte("\n"))
+
 }
 
 // Handler: Sign transaction
@@ -237,17 +275,16 @@ func requestTransactionHandler(c *gin.Context) {
 
 // Handler: Request RBT balance
 func requestBalanceHandler(c *gin.Context) {
-	// rubixNodePort := c.Query("port")
 	did := c.Query("did")
 
 	if did == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing required parameters: port or did \n"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing required parameter: did"})
 		return
 	}
 
 	user, err := storage.GetUserByDID(did)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User not found \n"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
@@ -264,6 +301,7 @@ func requestBalanceHandler(c *gin.Context) {
 	c.Writer.Write([]byte("\n"))
 }
 
+// Handler: Request to generate test RBTs
 func createTestRBTHandler(c *gin.Context) {
 	var req GenerateTestRBTRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -290,9 +328,39 @@ func createTestRBTHandler(c *gin.Context) {
 		c.Writer.Write([]byte("\n"))
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": resp,
-	})
+	c.JSON(http.StatusOK, resp)
+	// Add a newline to the response body if required
+	c.Writer.Write([]byte("\n"))
+}
+
+// Handler: Request to fetch Txns list by DID
+func getTxnByDIDHandler(c *gin.Context) {
+	did := c.Query("did")
+
+	if did == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing required parameter: did \n"})
+		return
+	}
+
+	role := c.Query("role")
+	startDate := c.Query("StartDate")
+	endDate := c.Query("EndDate")
+
+	user, err := storage.GetUserByDID(did)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	result, err := RequestTxnsByDID(did, role, startDate, endDate, strconv.Itoa(user.Port))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err})
+		// Add a newline to the response body if required
+		c.Writer.Write([]byte("\n"))
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 	// Add a newline to the response body if required
 	c.Writer.Write([]byte("\n"))
 }
@@ -421,7 +489,7 @@ func verifySignature(publicKey *secp256k1.PublicKey, data []byte, signature []by
 	return isValid
 }
 
-// RequestBalance sends request to Rubix node to provide RBT balance infofunc didRequest(pubkey *secp256k1.PublicKey, rubixNodePort string) (string, string, error) {
+// RequestBalance sends request to Rubix node to provide RBT balance info
 func RequestBalance(did string, rubixNodePort string) (map[string]interface{}, error) {
 
 	url := fmt.Sprintf("http://localhost:%s/api/get-account-info?did=%s", rubixNodePort, did)
@@ -465,6 +533,90 @@ func GenerateTestRBT(data GenerateTestRBTRequest, rubixNodePort string) (string,
 	}
 
 	url := fmt.Sprintf("http://localhost:%s/api/generate-test-token", rubixNodePort)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyJSON))
+	if err != nil {
+		fmt.Println("Error creating HTTP request:", err)
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Error sending HTTP request:", err)
+		return "", err
+	}
+	defer resp.Body.Close()
+	data2, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Error reading response body: %s\n", err)
+		return "", err
+	}
+
+	// Process the data as needed
+	var response map[string]interface{}
+	err = json.Unmarshal(data2, &response)
+	if err != nil {
+		fmt.Println("Error unmarshaling response:", err)
+	}
+
+	respMsg := response["message"].(string)
+	respStatus := response["status"].(bool)
+
+	if !respStatus {
+		return "", fmt.Errorf("test token generation failed, %s", respMsg)
+	}
+
+	return respMsg, nil
+}
+
+// RequestTxnsByDID sends request to Rubix node to provide list of all Txns involving the DID
+func RequestTxnsByDID(did string, role string, startDate string, endDate string, rubixNodePort string) (map[string]interface{}, error) {
+
+	url := fmt.Sprintf("http://localhost:%s/api/get-by-did?DID=%s&Role=%s&StartDate=%s&EndDate=%s", rubixNodePort, did, role, "", "")
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		fmt.Println("Error creating HTTP request:", err)
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Error sending HTTP request:", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data2, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Error reading response body: %s\n", err)
+		return nil, err
+	}
+
+	// Parse the response into a map
+	var response map[string]interface{}
+	err = json.Unmarshal(data2, &response)
+	if err != nil {
+		fmt.Println("Error unmarshaling response:", err)
+	}
+	return response, nil
+}
+
+// registerDIDRequestsends request to rubix node to publish the did info in the network
+func registerDIDRequest(did string, rubixNodePort string) (string, error) {
+	data := map[string]interface{}{
+		"did": did,
+	}
+	bodyJSON, err := json.Marshal(data)
+	if err != nil {
+		fmt.Println("Error marshaling JSON:", err)
+		return "", err
+	}
+
+	url := fmt.Sprintf("http://localhost:%s/api/register-did", rubixNodePort)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyJSON))
 	if err != nil {
 		fmt.Println("Error creating HTTP request:", err)
